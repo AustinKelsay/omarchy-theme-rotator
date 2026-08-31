@@ -2,14 +2,17 @@
   "schemaVersion": 1,
   "id": "plebdev.theme-rotator",
   "name": "Theme Rotator",
-  "version": "1.0.0",
-  "author": "plebdev",
+  "version": "2.0.0",
+  "author": "Austin Kelsay",
   "license": "MIT",
-  "description": "Persistent, configurable automatic Omarchy theme rotation.",
+  "description": "Automatic Omarchy theme rotation with native scheduling and controls.",
   "kinds": [
+    "service",
     "bar-widget"
   ],
+  "keepLoaded": true,
   "entryPoints": {
+    "service": "Service.qml",
     "barWidget": "BarWidget.qml"
   },
   "barWidget": {
@@ -17,6 +20,7 @@
     "description": "View and control automatic theme rotation.",
     "category": "System",
     "allowMultiple": false,
-    "defaultSection": "right"
+    "defaultSection": "right",
+    "aliases": ["theme-rotator", "themes"]
   }
 }

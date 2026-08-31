@@ -1,0 +1,280 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+readonly PROGRAM_NAME=${0##*/}
+readonly CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/theme-rotator.conf"
+readonly STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-theme-rotator"
+readonly RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp}/omarchy-theme-rotator"
+readonly PAUSED_FILE="$STATE_DIR/paused"
+readonly LAST_ROTATION_FILE="$STATE_DIR/last-rotation"
+
+set_defaults() {
+  INTERVAL_SECONDS=300
+  MODE=random
+  THEME_SOURCE=all
+  EXCLUDE_THEMES=(mapquest)
+  NOTIFY=true
+}
+
+set_defaults
+
+warn() {
+  printf '%s: %s\n' "$PROGRAM_NAME" "$*" >&2
+}
+
+die() {
+  warn "$*"
+  exit 1
+}
+
+usage() {
+  cat <<EOF
+Usage: $PROGRAM_NAME <command>
+
+Commands:
+  status   Print the current rotation status as JSON
+  tick     Rotate only when the schedule is due
+  next     Rotate immediately, even while paused
+  pause    Pause scheduled rotations
+  resume   Resume and restart the schedule
+  toggle   Toggle the paused state
+  config   Print the effective configuration as JSON
+  help     Show this help
+EOF
+}
+
+load_config() {
+  set_defaults
+
+  if [[ -r $CONFIG_FILE ]]; then
+    local evaluated_config
+    if ! evaluated_config=$(bash -c '
+      INTERVAL_SECONDS=300
+      MODE=random
+      THEME_SOURCE=all
+      EXCLUDE_THEMES=(mapquest)
+      NOTIFY=true
+      if ! source "$1" >/dev/null; then exit 65; fi
+      jq -cn \
+        --arg interval "${INTERVAL_SECONDS:-}" \
+        --arg mode "${MODE:-}" \
+        --arg source "${THEME_SOURCE:-}" \
+        --arg notify "${NOTIFY:-}" \
+        --args '"'"'{interval:$interval,mode:$mode,source:$source,notify:$notify,excludeThemes:$ARGS.positional}'"'"' \
+        -- "${EXCLUDE_THEMES[@]}"
+    ' bash "$CONFIG_FILE" 2>/dev/null) || [[ -z $evaluated_config ]]; then
+      warn "could not evaluate configuration; using defaults"
+      return
+    fi
+    INTERVAL_SECONDS=$(jq -r .interval <<<"$evaluated_config")
+    MODE=$(jq -r .mode <<<"$evaluated_config")
+    THEME_SOURCE=$(jq -r .source <<<"$evaluated_config")
+    NOTIFY=$(jq -r .notify <<<"$evaluated_config")
+    mapfile -t EXCLUDE_THEMES < <(jq -r '.excludeThemes[]' <<<"$evaluated_config")
+  fi
+
+  if [[ ! ${INTERVAL_SECONDS:-} =~ ^[0-9]+$ ]] || (( INTERVAL_SECONDS < 30 )); then
+    warn "invalid INTERVAL_SECONDS; using 300"
+    INTERVAL_SECONDS=300
+  fi
+  if [[ ${MODE:-} != random && ${MODE:-} != sequential ]]; then
+    warn "invalid MODE; using random"
+    MODE=random
+  fi
+  if [[ ${THEME_SOURCE:-} != all && ${THEME_SOURCE:-} != extras ]]; then
+    warn "invalid THEME_SOURCE; using all"
+    THEME_SOURCE=all
+  fi
+  if [[ ${NOTIFY:-} != true && ${NOTIFY:-} != false ]]; then
+    warn "invalid NOTIFY; using true"
+    NOTIFY=true
+  fi
+}
+
+ensure_directories() {
+  mkdir -p "$STATE_DIR" "$RUNTIME_DIR"
+}
+
+now() {
+  if [[ -n ${THEME_ROTATOR_NOW:-} ]]; then
+    printf '%s\n' "$THEME_ROTATOR_NOW"
+  else
+    date +%s
+  fi
+}
+
+normalize_theme() {
+  printf '%s' "$1" |
+    sed -E 's/<[^>]+>//g; s/^[[:space:]]+//; s/[[:space:]]+$//' |
+    tr '[:upper:]_' '[:lower:]-' |
+    tr -s ' -' '-'
+}
+
+is_excluded() {
+  local eligible_slug=$1 excluded_theme
+  for excluded_theme in "${EXCLUDE_THEMES[@]}"; do
+    [[ $eligible_slug == "$(normalize_theme "$excluded_theme")" ]] && return 0
+  done
+  return 1
+}
+
+available_themes() {
+  if [[ $THEME_SOURCE == extras ]]; then
+    omarchy theme extras
+  else
+    omarchy theme list
+  fi
+}
+
+choose_eligible_theme() {
+  local active_theme active_slug theme theme_slug theme_output active_index=-1 next_index
+  local -a themes=() eligible_themes=()
+
+  active_theme=$(omarchy theme current) || die "could not read the active Omarchy theme"
+  active_slug=$(normalize_theme "$active_theme")
+  theme_output=$(available_themes) || die "could not list themes from the '$THEME_SOURCE' source"
+
+  while IFS= read -r theme; do
+    [[ -n $theme ]] || continue
+    theme_slug=$(normalize_theme "$theme")
+    is_excluded "$theme_slug" && continue
+    [[ $theme_slug == "$active_slug" ]] && active_index=${#themes[@]}
+    themes+=("$theme")
+    [[ $theme_slug == "$active_slug" ]] || eligible_themes+=("$theme")
+  done <<<"$theme_output"
+
+  ((${#eligible_themes[@]} > 0)) || die "no eligible themes are available"
+
+  if [[ $MODE == random ]]; then
+    printf '%s\n' "${eligible_themes[@]}" | shuf -n 1
+    return
+  fi
+
+  if (( active_index < 0 )); then
+    printf '%s\n' "${themes[0]}"
+    return
+  fi
+
+  next_index=$(((active_index + 1) % ${#themes[@]}))
+  if [[ $(normalize_theme "${themes[$next_index]}") == "$active_slug" ]]; then
+    die "no eligible theme differs from the active theme"
+  fi
+  printf '%s\n' "${themes[$next_index]}"
+}
+
+with_rotation_lock() {
+  ensure_directories
+  exec 9>"$RUNTIME_DIR/rotation.lock"
+  flock -n 9 || return 0
+  "$@"
+}
+
+rotate() {
+  local next_theme rotated_at
+  next_theme=$(choose_eligible_theme)
+  if ! omarchy theme set "$next_theme"; then
+    die "failed to rotate to '$next_theme'"
+  fi
+
+  rotated_at=$(now)
+  printf '%s\n' "$rotated_at" >"$LAST_ROTATION_FILE"
+  if [[ $NOTIFY == true ]] && command -v notify-send >/dev/null 2>&1; then
+    notify-send -a "Theme Rotator" "Theme rotated" "$next_theme" || true
+  fi
+}
+
+schedule_due() {
+  local last_rotation current_time
+  [[ -e $PAUSED_FILE ]] && return 1
+  if [[ ! -r $LAST_ROTATION_FILE ]]; then
+    now >"$LAST_ROTATION_FILE"
+    return 1
+  fi
+  read -r last_rotation <"$LAST_ROTATION_FILE" || last_rotation=0
+  [[ $last_rotation =~ ^[0-9]+$ ]] || last_rotation=0
+  current_time=$(now)
+  (( current_time - last_rotation >= INTERVAL_SECONDS ))
+}
+
+tick() {
+  schedule_due || return 0
+  rotate
+}
+
+remaining_seconds() {
+  local last_rotation=0 current_time remaining
+  if [[ -r $LAST_ROTATION_FILE ]]; then
+    read -r last_rotation <"$LAST_ROTATION_FILE" || last_rotation=0
+  fi
+  [[ $last_rotation =~ ^[0-9]+$ ]] || last_rotation=0
+  if (( last_rotation == 0 )); then
+    printf '%s\n' "$INTERVAL_SECONDS"
+    return
+  fi
+  current_time=$(now)
+  remaining=$((INTERVAL_SECONDS - (current_time - last_rotation)))
+  (( remaining > 0 )) || remaining=0
+  printf '%s\n' "$remaining"
+}
+
+print_config() {
+  printf '%s\n' "${EXCLUDE_THEMES[@]}" | jq -Rsc \
+    --arg mode "$MODE" \
+    --arg source "$THEME_SOURCE" \
+    --argjson interval "$INTERVAL_SECONDS" \
+    --argjson notify "$NOTIFY" \
+    '{intervalSeconds:$interval,mode:$mode,source:$source,excludeThemes:(split("\n") | map(select(length > 0))),notify:$notify}'
+}
+
+print_status() {
+  local active_theme paused=false remaining
+  active_theme=$(omarchy theme current) || die "could not read the active Omarchy theme"
+  [[ -e $PAUSED_FILE ]] && paused=true
+  remaining=$(remaining_seconds)
+  jq -cn \
+    --arg theme "$active_theme" \
+    --arg mode "$MODE" \
+    --arg source "$THEME_SOURCE" \
+    --argjson paused "$paused" \
+    --argjson interval "$INTERVAL_SECONDS" \
+    --argjson remaining "$remaining" \
+    '{schemaVersion:1,theme:$theme,paused:$paused,intervalSeconds:$interval,remainingSeconds:$remaining,mode:$mode,source:$source}'
+}
+
+set_paused() {
+  ensure_directories
+  case $1 in
+    true) : >"$PAUSED_FILE" ;;
+    false)
+      rm -f -- "$PAUSED_FILE"
+      now >"$LAST_ROTATION_FILE"
+      ;;
+  esac
+}
+
+main() {
+  local command=${1:-status}
+  load_config
+  ensure_directories
+
+  case $command in
+    status) print_status ;;
+    tick) with_rotation_lock tick ;;
+    next) with_rotation_lock rotate ;;
+    pause) set_paused true ;;
+    resume) set_paused false ;;
+    toggle)
+      if [[ -e $PAUSED_FILE ]]; then set_paused false; else set_paused true; fi
+      ;;
+    config) print_config ;;
+    help | -h | --help) usage ;;
+    *)
+      warn "unknown command '$command'"
+      usage >&2
+      return 2
+      ;;
+  esac
+}
+
+main "$@"

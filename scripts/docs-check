@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+readonly ROOT
+readonly REQUIRED_DOCS=(README.md CHANGELOG.md CONTEXT.md CONTRIBUTING.md SECURITY.md docs/DESIGN.md docs/RELEASE.md docs/SPEC.md)
+
+for document in "${REQUIRED_DOCS[@]}"; do
+  [[ -s $ROOT/$document ]] || {
+    printf 'Required documentation is missing or empty: %s\n' "$document" >&2
+    exit 1
+  }
+done
+
+while IFS= read -r markdown_link; do
+  target=${markdown_link#*](}
+  target=${target%)}
+  [[ $target == http://* || $target == https://* || $target == \#* ]] && continue
+  target=${target%%#*}
+  [[ -e $ROOT/$target ]] || {
+    printf 'README contains a broken local link: %s\n' "$target" >&2
+    exit 1
+  }
+done < <(grep -oE '\[[^]]+\]\([^)]+\)' "$ROOT/README.md")
+
+printf 'Documentation contract is valid.\n'
+

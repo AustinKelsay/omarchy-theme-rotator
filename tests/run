@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+test_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+failures=0
+count=0
+
+for test_file in "$test_dir"/*_test.bash; do
+  # shellcheck disable=SC1090 # Test files are intentionally discovered.
+  source "$test_file"
+  while IFS= read -r test_name; do
+    count=$((count + 1))
+    if ( "$test_name" ); then
+      printf 'ok %d - %s\n' "$count" "${test_name//_/ }"
+    else
+      printf 'not ok %d - %s\n' "$count" "${test_name//_/ }"
+      failures=$((failures + 1))
+    fi
+  done < <(declare -F | awk '{print $3}' | grep '^test_' | sort)
+  mapfile -t test_functions < <(declare -F | awk '{print $3}' | grep '^test_' || true)
+  ((${#test_functions[@]} == 0)) || unset -f "${test_functions[@]}"
+done
+
+printf '1..%d\n' "$count"
+(( failures == 0 ))
