@@ -14,6 +14,20 @@ one-click control from the bar.
 - No root access and no system daemon
 - A scriptable JSON CLI
 
+## Requirements
+
+- Omarchy Quattro with Omarchy Shell plugin support
+- Bash 5 or newer
+- `jq` for the versioned JSON status contract
+- `flock` from `util-linux` for rotation locking
+- `notify-send` from `libnotify` is optional and used only when notifications
+  are enabled
+
+Theme Rotator does not download or execute remote code at runtime. It invokes
+the local `omarchy theme` commands and writes only to the current user's XDG
+config, state, and runtime directories. It requires neither root access nor
+network access.
+
 ## Install
 
 The native Omarchy path installs and enables the entire plugin:
@@ -70,6 +84,9 @@ fall back to safe defaults with a warning. Because the file is sourced as
 user-owned Bash to support arrays, do not copy configuration from untrusted
 sources.
 
+The installer creates the example configuration only when no configuration
+exists. Upgrades and uninstall preserve the user's configuration and state.
+
 ## CLI
 
 When installed through Omarchy alone, use the CLI at:
@@ -120,4 +137,3 @@ contract seams. See [CONTRIBUTING.md](CONTRIBUTING.md),
 ## License
 
 [MIT](LICENSE)
-
