@@ -12,9 +12,8 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install shell tooling
         run: sudo apt-get update && sudo apt-get install --yes jq shellcheck
       - name: Check
         run: make check
-
