@@ -1,0 +1,180 @@
+#!/bin/bash
+
+set -u
+
+CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/theme-rotator.conf"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-theme-rotator"
+RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp}/omarchy-theme-rotator"
+PAUSED_FILE="$STATE_DIR/paused"
+LAST_CHANGE_FILE="$STATE_DIR/last-change"
+
+INTERVAL_SECONDS=300
+MODE="random"
+THEME_SOURCE="all"
+EXCLUDE_THEMES=("mapquest")
+NOTIFY=true
+
+mkdir -p "$STATE_DIR" "$RUNTIME_DIR"
+
+load_config() {
+  INTERVAL_SECONDS=300
+  MODE="random"
+  THEME_SOURCE="all"
+  EXCLUDE_THEMES=("mapquest")
+  NOTIFY=true
+
+  if [[ -r "$CONFIG_FILE" ]]; then
+    # This is a user-owned shell configuration file.
+    source "$CONFIG_FILE"
+  fi
+
+  [[ "$INTERVAL_SECONDS" =~ ^[0-9]+$ ]] || INTERVAL_SECONDS=300
+  (( INTERVAL_SECONDS >= 30 )) || INTERVAL_SECONDS=30
+  [[ "$MODE" == "random" || "$MODE" == "sequential" ]] || MODE="random"
+  [[ "$THEME_SOURCE" == "all" || "$THEME_SOURCE" == "extras" ]] || THEME_SOURCE="all"
+}
+
+slugify() {
+  printf '%s' "$1" | sed -E 's/<[^>]+>//g' | tr '[:upper:]_' '[:lower:]-' | tr ' ' '-'
+}
+
+is_excluded() {
+  local candidate="$1"
+  local excluded
+  for excluded in "${EXCLUDE_THEMES[@]}"; do
+    [[ "$candidate" == "$(slugify "$excluded")" ]] && return 0
+  done
+  return 1
+}
+
+theme_list() {
+  if [[ "$THEME_SOURCE" == "extras" ]]; then
+    omarchy theme extras
+  else
+    omarchy theme list
+  fi
+}
+
+choose_theme() {
+  local current current_slug theme theme_slug current_index=-1 next_index
+  local -a themes=() candidates=()
+  current=$(omarchy theme current 2>/dev/null || true)
+  current_slug=$(slugify "$current")
+
+  while IFS= read -r theme; do
+    [[ -n "$theme" ]] || continue
+    theme_slug=$(slugify "$theme")
+    is_excluded "$theme_slug" && continue
+    [[ "$theme_slug" == "$current_slug" ]] && current_index=${#themes[@]}
+    themes+=("$theme")
+  done < <(theme_list)
+
+  ((${#themes[@]} > 0)) || return 1
+
+  if [[ "$MODE" == "sequential" ]]; then
+    if (( current_index >= 0 )); then
+      next_index=$(((current_index + 1) % ${#themes[@]}))
+      (( next_index != current_index )) || return 1
+    else
+      next_index=0
+    fi
+    printf '%s\n' "${themes[$next_index]}"
+  else
+    for theme in "${themes[@]}"; do
+      [[ "$(slugify "$theme")" == "$current_slug" ]] || candidates+=("$theme")
+    done
+    ((${#candidates[@]} > 0)) || return 1
+    printf '%s\n' "${candidates[@]}" | shuf -n 1
+  fi
+}
+
+rotate_next() {
+  load_config
+  exec 9>"$RUNTIME_DIR/change.lock"
+  flock -n 9 || return 0
+
+  local next
+  next=$(choose_theme) || {
+    printf 'No eligible Omarchy themes found.\n' >&2
+    return 1
+  }
+
+  if omarchy theme set "$next"; then
+    date +%s >"$LAST_CHANGE_FILE"
+    if [[ "$NOTIFY" == true ]] && command -v notify-send >/dev/null 2>&1; then
+      notify-send -a "Theme Rotator" "Theme changed" "$next"
+    fi
+  fi
+}
+
+status_json() {
+  load_config
+  local paused=false current last=0 now remaining
+  [[ -e "$PAUSED_FILE" ]] && paused=true
+  current=$(omarchy theme current 2>/dev/null || printf 'Unknown')
+  [[ -r "$LAST_CHANGE_FILE" ]] && read -r last <"$LAST_CHANGE_FILE"
+  [[ "$last" =~ ^[0-9]+$ ]] || last=0
+  now=$(date +%s)
+  remaining=$((INTERVAL_SECONDS - (now - last)))
+  (( remaining > 0 )) || remaining=0
+  jq -cn \
+    --arg theme "$current" \
+    --arg mode "$MODE" \
+    --arg source "$THEME_SOURCE" \
+    --argjson paused "$paused" \
+    --argjson interval "$INTERVAL_SECONDS" \
+    --argjson remaining "$remaining" \
+    '{theme:$theme,paused:$paused,intervalSeconds:$interval,remainingSeconds:$remaining,mode:$mode,source:$source}'
+}
+
+daemon() {
+  if [[ ! -r "$LAST_CHANGE_FILE" ]]; then
+    date +%s >"$LAST_CHANGE_FILE"
+  fi
+
+  while true; do
+    load_config
+    if [[ -e "$PAUSED_FILE" ]]; then
+      sleep 5
+      continue
+    fi
+
+    local last=0 now elapsed wait_for
+    read -r last <"$LAST_CHANGE_FILE" || last=0
+    [[ "$last" =~ ^[0-9]+$ ]] || last=0
+    now=$(date +%s)
+    elapsed=$((now - last))
+
+    if (( elapsed >= INTERVAL_SECONDS )); then
+      rotate_next || true
+      sleep 5
+    else
+      wait_for=$((INTERVAL_SECONDS - elapsed))
+      (( wait_for <= 5 )) || wait_for=5
+      sleep "$wait_for"
+    fi
+  done
+}
+
+case "${1:-status}" in
+  daemon) daemon ;;
+  next) rotate_next ;;
+  pause) : >"$PAUSED_FILE" ;;
+  resume)
+    rm -f -- "$PAUSED_FILE"
+    date +%s >"$LAST_CHANGE_FILE"
+    ;;
+  toggle)
+    if [[ -e "$PAUSED_FILE" ]]; then
+      rm -f -- "$PAUSED_FILE"
+      date +%s >"$LAST_CHANGE_FILE"
+    else
+      : >"$PAUSED_FILE"
+    fi
+    ;;
+  status) status_json ;;
+  *)
+    printf 'Usage: %s {daemon|next|pause|resume|toggle|status}\n' "$0" >&2
+    exit 2
+    ;;
+esac

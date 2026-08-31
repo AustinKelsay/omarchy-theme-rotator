@@ -1,0 +1,15 @@
+# Rotation interval. Values below 30 seconds are clamped to 30.
+INTERVAL_SECONDS=300
+
+# "random" avoids the current theme; "sequential" walks alphabetically.
+MODE="random"
+
+# "all" includes stock and user-installed themes; "extras" uses only extras.
+THEME_SOURCE="all"
+
+# Theme slugs to skip. Add entries using the lowercase, hyphenated form.
+EXCLUDE_THEMES=("mapquest")
+
+# Show a desktop notification after an automatic or manual change.
+NOTIFY=true
+

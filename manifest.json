@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "plebdev.theme-rotator",
+  "name": "Theme Rotator",
+  "version": "1.0.0",
+  "author": "plebdev",
+  "license": "MIT",
+  "description": "Persistent, configurable automatic Omarchy theme rotation.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Theme Rotator",
+    "description": "View and control automatic theme rotation.",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
